@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=train-dgvisc1
+#SBATCH --nodes=1
+#SBATCH --ntasks=64
+#SBATCH --gpus-per-node=1
+#SBATCH --time=12:00:00
+#SBATCH --partition=smallgpu
+#SBATCH -A lilly-rob1
+#SBATCH --output=slurm-logs/slurm-%j-%x.out
+#SBATCH --mail-type=END,FAIL,TIME_LIMIT
+#SBATCH --mail-user=hviswan@purdue.edu
+
+# --------- setup ---------
+source define.sh
+
+# ------- slurm job -------
+# execute training
+export MUJOCO_GL=egl
+
+cd ..
+# VIB+VISC
+python main.py --env_name=humanoidmaze-large-navigate-v0 --agent=agents/gcivl/state/vib.py --agent.alpha=10.0 --agent.beta=0.001 --agent.goalrep_dim=256 --agent.discount=0.995 --seed 1
+python main.py --env_name=antsoccer-arena-navigate-v0 --agent=agents/gcivl/state/vib.py --agent.alpha=10.0 --agent.beta=0.001 --agent.goalrep_dim=256 --agent.discount=0.99 --seed 1
+python main.py --env_name=cube-single-play-v0 --agent=agents/gcivl/state/vib.py --agent.alpha=10.0 --agent.beta=0.001 --agent.goalrep_dim=256 --agent.discount=0.99 --seed 1
+python main.py --env_name=cube-double-play-v0 --agent=agents/gcivl/state/vib.py --agent.alpha=10.0 --agent.beta=0.001 --agent.goalrep_dim=256 --agent.discount=0.99 --seed 1
+python main.py --env_name=scene-play-v0 --agent=agents/gcivl/state/vib.py --agent.alpha=10.0 --agent.beta=0.001 --agent.goalrep_dim=256 --agent.discount=0.99 --seed 1
+python main.py --env_name=puzzle-3x3-play-v0 --agent=agents/gcivl/state/vib.py --agent.alpha=10.0 --agent.beta=0.001 --agent.goalrep_dim=256 --agent.discount=0.99 --seed 1
+python main.py --env_name=puzzle-4x4-play-v0 --agent=agents/gcivl/state/vib.py --agent.alpha=10.0 --agent.beta=0.001 --agent.goalrep_dim=256 --agent.discount=0.99 --seed 1

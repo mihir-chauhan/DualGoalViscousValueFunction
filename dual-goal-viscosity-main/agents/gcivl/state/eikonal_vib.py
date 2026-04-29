@@ -1,0 +1,380 @@
+import copy
+from typing import Any
+
+import flax
+import jax
+import jax.numpy as jnp
+import ml_collections
+import optax
+from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
+from utils.networks import GCActor, GCDiscreteActor, GCValue, MLP
+from utils.vib import VIB
+from jax.scipy.special import logsumexp
+
+class GCIVLVIBEikAgent(flax.struct.PyTreeNode):
+    """Goal-conditioned implicit V-learning (GCIVL) agent.
+    Uses a VIB (Variational Information Bottleneck) goal representation.
+
+    This is a variant of GCIQL that only uses a V function, without Q functions.
+    """
+
+    rng: Any
+    network: Any
+    config: Any = nonpytree_field()
+
+    @staticmethod
+    def expectile_loss(adv, diff, expectile):
+        """Compute the expectile loss."""
+        weight = jnp.where(adv >= 0, expectile, (1 - expectile))
+        return weight * (diff**2)
+
+    def compute_grad_norm(self, network_key, s, g, params):
+        """
+        Compute ||grad V|| w.r.t state for either 'value' or 'rep_value'.
+        """
+        def value_sum(obs, goal, p):
+            # Select the correct network head
+            if network_key == 'rep_value':
+                # Returns single value v
+                v = self.network.select(network_key)(obs, goal, params=p)
+                return (-v).mean() # Distance = -V
+            else:
+                # Returns ensemble (v1, v2) - we just use v1 for grad norm
+                v1, _ = self.network.select(network_key)(obs, goal, params=p)
+                return (-v1).mean()
+
+        # Compute gradient w.r.t observations (arg 0)
+        grad_fn = jax.vmap(jax.grad(lambda _s, _g, _p: value_sum(_s[None], _g[None], _p).squeeze()), in_axes=(0, 0, None))
+        grads = grad_fn(s, g, params)
+        norm = jnp.linalg.norm(grads + 1e-8, axis=-1)
+        return norm
+
+    @jax.jit
+    def distance_grad_s(self, obs, goals, grad_params):
+        """
+        Baseline Helper: Compute the exact gradient norm of the value function.
+        Used for verification only.
+        """
+        def value_sum(s, g, params):
+            # We want grad(-V). Since V is negative distance, -V is positive distance.
+            v1, v2 = self.network.select('value')(s, g, params=params)
+            return (-v1).mean(), (-v2).mean()
+
+        # Compute gradients w.r.t state (argnums=0)
+        # We use vmap to handle the batch dimension correctly
+        grad_fn1 = jax.vmap(jax.grad(lambda s, g, p: -self.network.select('value')(s[None], g[None], params=p)[0].squeeze()), in_axes=(0, 0, None))
+        grad_fn2 = jax.vmap(jax.grad(lambda s, g, p: -self.network.select('value')(s[None], g[None], params=p)[1].squeeze()), in_axes=(0, 0, None))
+        
+        g1 = grad_fn1(obs, goals, grad_params)
+        g2 = grad_fn2(obs, goals, grad_params)
+        return g1, g2
+
+    def eikonal_loss(self, batch, grad_params, key):
+        
+        # 2. Setup Inputs
+        obs = batch['observations']
+        local_speed = batch['speed']
+        if local_speed.ndim == 1: local_speed = local_speed[:, None]
+        goal_reps, kl_loss, kl_info = self.network.select('vib')(
+            batch['value_goals'], key, encoded=False, params=grad_params
+        )
+        B, D = obs.shape
+        G = goal_reps.shape[-1]
+
+        # 3. Get V(s) [Anchor]
+        v_out = self.network.select('value')(obs, goal_reps, params=grad_params)
+        
+        # Ensemble handling
+        if isinstance(v_out, tuple):
+            v_s = (v_out[0] + v_out[1]) / 2.0
+        elif hasattr(v_out, 'shape') and v_out.shape[0] == 2 and v_out.ndim > 1:
+            v_s = jnp.mean(v_out, axis=0)
+        else:
+            v_s = v_out
+            
+        if v_s.ndim == 1: v_s = v_s[:, None] # (B, 1)
+        
+        #goal_reps = self.network.select('rep_value')(batch['value_goals'])
+        
+        g1, g2 = self.distance_grad_s(batch['observations'], goal_reps, grad_params)
+        norm1 = jnp.linalg.norm(g1 + 1e-8, axis=-1)
+        norm2 = jnp.linalg.norm(g2 + 1e-8, axis=-1)
+        target_norm = 1.0
+
+        #grad_loss = jnp.square(norm1 - resistance).mean()
+        grad_loss1 = jnp.square((norm1 - target_norm)).mean()
+        grad_loss2 = jnp.square((norm2 - target_norm)).mean()
+        grad_loss = grad_loss1 + grad_loss2
+        
+        # Weights
+        total_loss = grad_loss #+ grad_loss
+        
+        logs = {
+            'eikonal_loss': grad_loss,
+            'grad_norm': norm1.mean()
+        }
+
+        return total_loss, logs
+
+    def value_loss(self, batch, grad_params, rng):
+        """Compute the IVL value loss.
+
+        This value loss is similar to the original IQL value loss, but involves additional tricks to stabilize training.
+        For example, when computing the expectile loss, we separate the advantage part (which is used to compute the
+        weight) and the difference part (which is used to compute the loss), where we use the target value function to
+        compute the former and the current value function to compute the latter. This is similar to how double DQN
+        mitigates overestimation bias.
+        """
+        goal_reps, kl_loss, kl_info = self.network.select('vib')(
+            batch['value_goals'], rng, encoded=False, params=grad_params
+        )
+
+        (next_v1_t, next_v2_t) = self.network.select('target_value')(
+            batch['next_observations'], jax.lax.stop_gradient(goal_reps)
+        )
+        next_v_t = jnp.minimum(next_v1_t, next_v2_t)
+        q = batch['rewards'] + self.config['discount'] * batch['masks'] * next_v_t
+
+        (v1_t, v2_t) = self.network.select('target_value')(batch['observations'], jax.lax.stop_gradient(goal_reps))
+        v_t = (v1_t + v2_t) / 2
+        adv = q - v_t
+
+        q1 = batch['rewards'] + self.config['discount'] * batch['masks'] * next_v1_t
+        q2 = batch['rewards'] + self.config['discount'] * batch['masks'] * next_v2_t
+        (v1, v2) = self.network.select('value')(batch['observations'], goal_reps, params=grad_params)
+        v = (v1 + v2) / 2
+
+        value_loss1 = self.expectile_loss(adv, q1 - v1, self.config['expectile']).mean()
+        value_loss2 = self.expectile_loss(adv, q2 - v2, self.config['expectile']).mean()
+        value_loss = value_loss1 + value_loss2
+
+        total_loss = value_loss + kl_loss
+        logs = {
+            'value_loss': value_loss,
+            'v_mean': v.mean(),
+            'v_max': v.max(),
+            'v_min': v.min(),
+        }
+
+        if self.config.get('enable_eikonal_regularization', True):
+            v_loss, v_loss_dict = self.eikonal_loss(batch, grad_params, self.rng)
+            total_loss += v_loss
+            logs.update(**v_loss_dict)
+            return total_loss, logs | kl_info
+
+        return value_loss + kl_loss, {
+            'value_loss': value_loss,
+            'v_mean': v.mean(),
+            'v_max': v.max(),
+            'v_min': v.min(),
+            'kl_loss': kl_loss,
+        } | kl_info
+
+    def actor_loss(self, batch, grad_params, rng):
+        """Compute the AWR actor loss."""
+        goal_reps, _, _ = self.network.select('vib')(batch['actor_goals'], rng, encoded=False)
+
+        v1, v2 = self.network.select('value')(batch['observations'], jax.lax.stop_gradient(goal_reps))
+        nv1, nv2 = self.network.select('value')(batch['next_observations'], jax.lax.stop_gradient(goal_reps))
+        v = (v1 + v2) / 2
+        nv = (nv1 + nv2) / 2
+        adv = nv - v
+
+        exp_a = jnp.exp(adv * self.config['alpha'])
+        exp_a = jnp.minimum(exp_a, 100.0)
+
+        dist = self.network.select('actor')(batch['observations'], goal_reps, params=grad_params)
+        log_prob = dist.log_prob(batch['actions'])
+
+        actor_loss = -(exp_a * log_prob).mean()
+
+        actor_info = {
+            'actor_loss': actor_loss,
+            'adv': adv.mean(),
+            'bc_log_prob': log_prob.mean(),
+        }
+        if not self.config['discrete']:
+            actor_info.update(
+                {
+                    'mse': jnp.mean((dist.mode() - batch['actions']) ** 2),
+                    'std': jnp.mean(dist.scale_diag),
+                }
+            )
+
+        return actor_loss, actor_info
+
+    @jax.jit
+    def total_loss(self, batch, grad_params, rng=None):
+        """Compute the total loss."""
+        info = {}
+        rng = rng if rng is not None else self.rng
+
+        rng, value_rng = jax.random.split(rng)
+        value_loss, value_info = self.value_loss(batch, grad_params, value_rng)
+        for k, v in value_info.items():
+            info[f'value/{k}'] = v
+
+        rng, actor_rng = jax.random.split(rng)
+        actor_loss, actor_info = self.actor_loss(batch, grad_params, actor_rng)
+        for k, v in actor_info.items():
+            info[f'actor/{k}'] = v
+
+        loss = value_loss + actor_loss
+        return loss, info
+
+    def target_update(self, network, module_name):
+        """Update the target network."""
+        new_target_params = jax.tree_util.tree_map(
+            lambda p, tp: p * self.config['tau'] + tp * (1 - self.config['tau']),
+            self.network.params[f'modules_{module_name}'],
+            self.network.params[f'modules_target_{module_name}'],
+        )
+        network.params[f'modules_target_{module_name}'] = new_target_params
+
+    @jax.jit
+    def update(self, batch):
+        """Update the agent and return a new agent with information dictionary."""
+        new_rng, rng = jax.random.split(self.rng)
+
+        def loss_fn(grad_params):
+            return self.total_loss(batch, grad_params, rng=rng)
+
+        new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
+        self.target_update(new_network, 'value')
+
+        return self.replace(network=new_network, rng=new_rng), info
+
+    @jax.jit
+    def sample_actions(
+        self,
+        observations,
+        goals=None,
+        seed=None,
+        temperature=1.0,
+    ):
+        """Sample actions from the actor."""
+        vib_seed, seed = jax.random.split(seed)
+        goal_reps, _, _ = self.network.select('vib')(goals, vib_seed, encoded=False)
+
+        dist = self.network.select('actor')(observations, goal_reps, temperature=temperature)
+        sample_seed, seed = jax.random.split(seed)
+        actions = dist.sample(seed=sample_seed)
+        if not self.config['discrete']:
+            actions = jnp.clip(actions, -1, 1)
+        return actions
+
+    @classmethod
+    def create(
+        cls,
+        seed,
+        ex_observations,
+        ex_actions,
+        config,
+        ex_goals=None,
+    ):
+        """Create a new agent.
+
+        Args:
+            seed: Random seed.
+            ex_observations: Example batch of observations.
+            ex_actions: Example batch of actions. In discrete-action MDPs, this should contain the maximum action value.
+            config: Configuration dictionary.
+        """
+        rng = jax.random.PRNGKey(seed)
+        rng, init_rng = jax.random.split(rng, 2)
+
+        ex_goals = jnp.zeros(shape=(1, config['goalrep_dim']))
+        if config['discrete']:
+            action_dim = ex_actions.max() + 1
+        else:
+            action_dim = ex_actions.shape[-1]
+
+        # NOTE: this version does not support pixel-based observations; please refer to the visual-dedicated file.
+        # Define value and actor networks.
+        value_def = GCValue(
+            hidden_dims=config['value_hidden_dims'],
+            layer_norm=config['layer_norm'],
+            ensemble=True,
+        )
+
+        if config['discrete']:
+            actor_def = GCDiscreteActor(
+                hidden_dims=config['actor_hidden_dims'],
+                action_dim=action_dim,
+            )
+        else:
+            actor_def = GCActor(
+                hidden_dims=config['actor_hidden_dims'],
+                action_dim=action_dim,
+                state_dependent_std=False,
+                const_std=config['const_std'],
+            )
+
+        vib_def = VIB(
+            encoder=MLP(
+                hidden_dims=config['vib_hidden_dims'],
+                layer_norm=config['layer_norm'],
+            ),
+            beta=config['beta'],
+            rep_dim=config['goalrep_dim'],
+        )
+
+        network_info = dict(
+            vib=(vib_def, (ex_observations, jax.random.PRNGKey(0), False)),
+            value=(value_def, (ex_observations, ex_goals)),
+            target_value=(copy.deepcopy(value_def), (ex_observations, ex_goals)),
+            actor=(actor_def, (ex_observations, ex_goals)),
+        )
+        networks = {k: v[0] for k, v in network_info.items()}
+        network_args = {k: v[1] for k, v in network_info.items()}
+
+        network_def = ModuleDict(networks)
+        network_tx = optax.adam(learning_rate=config['lr'])
+        network_params = network_def.init(init_rng, **network_args)['params']
+        network = TrainState.create(network_def, network_params, tx=network_tx)
+
+        params = network_params
+        params['modules_target_value'] = params['modules_value']
+
+        return cls(rng, network=network, config=flax.core.FrozenDict(**config))
+
+
+def get_config():
+    config = ml_collections.ConfigDict(
+        dict(
+            # Agent hyperparameters.
+            agent_name='gcivl_eik_vib',  # Agent name.
+            lr=3e-4,  # Learning rate.
+            batch_size=1024,  # Batch size.
+            vib_hidden_dims=(512, 512, 512),  # VIB network hidden dimensions.
+            actor_hidden_dims=(512, 512, 512),  # Actor network hidden dimensions.
+            value_hidden_dims=(512, 512, 512),  # Value network hidden dimensions.
+            layer_norm=True,  # Whether to use layer normalization.
+            discount=0.99,  # Discount factor.
+            tau=0.005,  # Target network update rate.
+            expectile=0.9,  # IQL expectile.
+            alpha=10.0,  # AWR temperature.
+            const_std=True,  # Whether to use constant standard deviation for the actor.
+            discrete=False,  # Whether the action space is discrete.
+            goalrep_dim=64,  # Dimensionality of the VIB goal representation.
+            beta=0.003,  # VIB strength hyperparameter.
+            # Dataset hyperparameters.
+            dataset_class='GCDataset',  # Dataset class name.
+            enable_fk_regularization = True,
+            speed_profile = 'constant', # the speed profile used in the Eikonal loss
+            oraclerep=False,  # always False; dummy option for compatibility.
+            norm=False,  # Whether to use dataset normalization.
+            value_p_curgoal=0.2,  # Probability of using the current state as the value goal.
+            value_p_trajgoal=0.5,  # Probability of using a future state in the same trajectory as the value goal.
+            value_p_randomgoal=0.3,  # Probability of using a random state as the value goal.
+            value_geom_sample=True,  # Whether to use geometric sampling for future value goals.
+            actor_p_curgoal=0.0,  # Probability of using the current state as the actor goal.
+            actor_p_trajgoal=1.0,  # Probability of using a future state in the same trajectory as the actor goal.
+            actor_p_randomgoal=0.0,  # Probability of using a random state as the actor goal.
+            actor_geom_sample=False,  # Whether to use geometric sampling for future actor goals.
+            gc_negative=True,  # Whether to use '0 if s == g else -1' (True) or '1 if s == g else 0' (False) as reward.
+            p_aug=0.0,  # Probability of applying image augmentation.
+            frame_stack=ml_collections.config_dict.placeholder(int),  # Number of frames to stack.
+        )
+    )
+    return config

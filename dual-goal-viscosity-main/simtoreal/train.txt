@@ -1,0 +1,119 @@
+================================================================
+Real-Franka GCIVL-Dual training guide — demo counts & hyperparams
+================================================================
+
+Practical guidance, calibrated to offline goal-conditioned value
+learning on small real-robot datasets.
+
+----------------------------------------------------------------
+DEMO COUNTS
+----------------------------------------------------------------
+
+Task 1 — Reach-grasp under the roof
+  Demos: 25–35
+  Rationale: Single-phase reach with a spatial constraint. Vary
+  the *start* pose (±5° per joint) and the block's xy by ~1–2 cm
+  across demos so the value function sees state coverage around
+  the approach corridor. Half above-and-front, half from the side.
+
+Task 2 — Pick-and-place on the 14" cube
+  Demos: 40–60
+  Rationale: Two-phase, ~2× horizon. Needs more data to interpolate
+  reach → grasp → lift → place. Vary block start location (~3 cm)
+  AND place location on the roof (~3 cm). Add 5–10 demos that
+  approach the place from different post-lift angles.
+
+For both:
+  Don't record only optimal demos — 10–20% slightly suboptimal
+  trajectories help the IQL expectile see lower-value states.
+
+----------------------------------------------------------------
+TRAINING PARAMETERS
+----------------------------------------------------------------
+
+Start from `agents/gcivl/state/dual.py:464` defaults; only override
+what's task-specific.
+
+----- Task 1 (reach-grasp, ~10–15 s episodes) -----
+
+python -m simtoreal.train_real \
+    --dataset_dir ./datasets/franka_t1 \
+    --save_dir    ./runs/t1_fk \
+    --train_steps 150000 \
+    --agent.discount=0.99 \
+    --agent.expectile=0.85 \
+    --agent.alpha=10.0 \
+    --agent.batch_size=512 \
+    --agent.viscous_scale=0.001 \
+    --agent.num_walks=10 \
+    --agent.goalrep_dim=128 \
+    --agent.value_p_curgoal=0.2 \
+    --agent.value_p_trajgoal=0.5 \
+    --agent.value_p_randomgoal=0.3 \
+    --agent.enable_fk_regularization=True
+
+Eval-time:
+    --episode-length 150
+    --control-hz 10
+    --joint-delta-clip 0.04
+
+
+----- Task 2 (pick-and-place, ~20–30 s episodes) -----
+
+Longer horizon → larger discount, more aggressive AWR, more
+trajgoal sampling so the value learns sub-goals along the
+lift → place arc.
+
+python -m simtoreal.train_real \
+    --dataset_dir ./datasets/franka_t2 \
+    --save_dir    ./runs/t2_fk \
+    --train_steps 250000 \
+    --agent.discount=0.995 \
+    --agent.expectile=0.9 \
+    --agent.alpha=20.0 \
+    --agent.batch_size=512 \
+    --agent.viscous_scale=0.002 \
+    --agent.num_walks=16 \
+    --agent.goalrep_dim=256 \
+    --agent.value_p_curgoal=0.1 \
+    --agent.value_p_trajgoal=0.6 \
+    --agent.value_p_randomgoal=0.3 \
+    --agent.enable_fk_regularization=True
+
+Eval-time:
+    --episode-length 300
+    --control-hz 10
+    --joint-delta-clip 0.05
+
+----------------------------------------------------------------
+WHAT STAYS THE SAME ACROSS BOTH
+----------------------------------------------------------------
+
+- lr=3e-4 (default), tau=0.005, rep_expectile=0.7, rep_type='bilinear'
+  These are the published defaults that the FK-vs-no-FK comparison
+  was tuned against. Don't change them, otherwise the ablation is
+  not apples-to-apples.
+
+- Run the EXACT SAME command twice with
+  --agent.enable_fk_regularization=True
+  then
+  --agent.enable_fk_regularization=False
+  and --save_dir swapped. That is your comparison.
+
+- Record a goal_pose.json per task (you already have save_goal_pose.py
+  in the CQN-AS folder) so eval success is not only joint-distance —
+  you can also gate on EE pose if you want a tighter task metric.
+
+----------------------------------------------------------------
+KNOBS TO WATCH DURING TRAINING
+----------------------------------------------------------------
+
+- validation/value/value_loss should plateau, not climb.
+  If it climbs → lower train_steps or alpha.
+
+- validation/value/fk_loss should drop and stabilize.
+  If it explodes → viscous_scale is too high.
+
+- training/value/v_max - v_min collapsing to 0 means the value
+  function is degenerate — usually too much FK weight.
+  Halve viscous_scale.

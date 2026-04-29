@@ -1,0 +1,23 @@
+{
+  "name": "lab_room_example",
+  "cell_size_m": 1.0,
+  "origin_xy_m": [0.0, 0.0],
+  "wall_thickness_m": 0.05,
+  "_comment": [
+    "Replace maze_map with your real-room measurements.",
+    "Each row has the same number of columns. 0 = free, 1 = wall.",
+    "Row 0 is the top of the map (smallest y).",
+    "Set origin_xy_m to the world (x, y) of the centre of cell (0, 0).",
+    "start_cell and goal_cell are [row, col] indices into maze_map."
+  ],
+  "maze_map": [
+    [1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 0, 0, 0, 0, 1, 0, 1],
+    [1, 0, 1, 1, 0, 1, 0, 1],
+    [1, 0, 1, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 1, 1, 0, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1]
+  ],
+  "start_cell": [1, 1],
+  "goal_cell":  [3, 5]
+}

@@ -1,0 +1,152 @@
+================================================================
+Real-room pointmaze on Spot — workflow & training params
+================================================================
+
+Same agent (agents/gcivl/state/dual.py), same FK-on-vs-off
+ablation as the Franka work; only the dataset and the eval
+driver are different.
+
+----------------------------------------------------------------
+1) DESCRIBE THE ROOM
+----------------------------------------------------------------
+
+Edit simtoreal_maze/lab_room.example.json (or copy → lab_room.json):
+
+  cell_size_m  : 1.0     # metres per grid cell (good default for Spot)
+  origin_xy_m  : [0,0]   # world (x,y) of the centre of cell (0,0)
+  maze_map     : 2D list, row 0 is the top (smallest y); 0 = free, 1 = wall
+  start_cell   : [row, col] for synthetic-demo start
+  goal_cell    : [row, col] for synthetic-demo goal
+
+Always ring the maze_map perimeter with 1's so demos can never
+escape the room.
+
+----------------------------------------------------------------
+2) GENERATE SYNTHETIC DEMOS  (BFS oracle + noise)
+----------------------------------------------------------------
+
+python -m simtoreal_maze.generate_demos \
+    --maze-json    simtoreal_maze/lab_room.json \
+    --out-dir      ./datasets/maze_lab \
+    --num-episodes 1000 \
+    --noise        0.2 \
+    --max-steps    500
+
+Numbers to reach for:
+
+  num-episodes : 1000  (~100k–200k transitions; matches OGBench)
+                  500   minimum if the room is small (≤ 6×6 cells)
+                  2000+ for larger rooms (≥ 10×10 cells)
+  noise        : 0.2   (OGBench default; lower → cleaner demos but
+                        the value function generalizes worse)
+  max-steps    : 500   (cap per trajectory; for a 6×6 room with
+                        cell_size 1.0 m this is ~3× more than needed)
+
+Sanity-check after generation:
+
+  python -c "import numpy as np; d=np.load('./datasets/maze_lab/maze_real.npz'); \
+             print({k: d[k].shape for k in d.files})"
+
+  observations should be (N, 2), actions (N, 2), terminals (N,), valids (N,).
+
+----------------------------------------------------------------
+3) TRAIN — FK ON vs OFF (the proposed ablation)
+----------------------------------------------------------------
+
+# Proposed (FK regularizer ON)
+python -m simtoreal_maze.train_maze \
+    --dataset_dir ./datasets/maze_lab \
+    --save_dir    ./runs/maze_lab_fk \
+    --train_steps 500000 \
+    --agent.enable_fk_regularization=True
+
+# Baseline (FK regularizer OFF)
+python -m simtoreal_maze.train_maze \
+    --dataset_dir ./datasets/maze_lab \
+    --save_dir    ./runs/maze_lab_nofk \
+    --train_steps 500000 \
+    --agent.enable_fk_regularization=False
+
+Recommended hyperparameters (start from defaults; only deviate if
+you see one of the failure modes below):
+
+  train_steps        : 500000   (1M for ≥10×10 rooms)
+  batch_size         : 1024     (drop to 512 if VRAM-constrained)
+  discount           : 0.99
+  expectile          : 0.9
+  alpha              : 10.0
+  rep_expectile      : 0.7
+  goalrep_dim        : 256
+  rep_type           : bilinear
+  viscous_scale      : 0.0001   (matches gilbreth pointmaze runs)
+  num_walks          : 10
+  speed_profile      : constant  (no obstacle map → no speed map)
+  value_p_curgoal    : 0.2
+  value_p_trajgoal   : 0.5
+  value_p_randomgoal : 0.3
+
+DO NOT change rep_expectile / rep_type / lr / tau between the two
+runs — that is the only way the FK-vs-no-FK comparison stays clean.
+
+Knobs to watch (mirror simtoreal/train.txt for the Franka work):
+
+  validation/value/value_loss   should plateau, not climb.
+                                Climbing → lower train_steps or alpha.
+  validation/value/fk_loss      should drop and stabilize.
+                                Exploding → viscous_scale too high.
+  training/value/v_max - v_min  collapsing to ~0 means the value
+                                function is degenerate.
+                                Halve viscous_scale, or check that
+                                terminals/valids are correctly set.
+
+----------------------------------------------------------------
+4) DRY-RUN BEFORE TOUCHING SPOT
+----------------------------------------------------------------
+
+python -m simtoreal_maze.eval_spot --dry-run \
+    --save-dir       ./runs/maze_lab_fk \
+    --restore-step   500000 \
+    --num-episodes   3 \
+    --max-steps      300
+
+The dry-run integrates each commanded waypoint in software. It
+should close on the goal in well under max_steps for both runs.
+If FK-off doesn't close at all and FK-on does, that is the
+expected ablation signal.
+
+----------------------------------------------------------------
+5) RUN ON SPOT
+----------------------------------------------------------------
+
+Pre-flight:
+  - Operator holds the e-stop the entire time.
+  - Spot is standing in a clear area corresponding to start_cell.
+  - The room layout matches lab_room.json to within cell_size/2.
+  - bosdyn-client / bosdyn-api Python packages are installed.
+
+python -m simtoreal_maze.eval_spot \
+    --save-dir     ./runs/maze_lab_fk \
+    --restore-step 500000 \
+    --hostname     <SPOT_HOSTNAME> \
+    --username     <USER> \
+    --password     <PASS> \
+    --num-episodes 3 \
+    --max-steps    300 \
+    --control-period-s 1.0
+
+The script:
+  1. Powers on Spot, blocking-stand.
+  2. Anchors the world frame at the body's current odom xy
+     (so cell (0,0) lives at that anchor + origin_xy_m).
+  3. Drives to start_xy.
+  4. Each control step:
+       xy   = read body pose (odom-relative, world-aligned)
+       a    = agent.sample_actions(xy, goal_xy)  (clipped to [-1,1])
+       wp   = xy + 0.2 * a
+       send synchro_se2_trajectory_point_command(wp, frame=odom)
+  5. Stops when ||xy - goal|| <= cell_size / 2 or max_steps.
+  6. Sits Spot and powers off (also on KeyboardInterrupt).
+
+Compare runs/maze_lab_fk/eval_spot_results.json vs
+runs/maze_lab_nofk/eval_spot_results.json — success_rate and
+per-episode min_dist_m are the headline numbers.
