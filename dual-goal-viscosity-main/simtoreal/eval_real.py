@@ -191,27 +191,55 @@ class _RealRobot:
         self._RelDyn = RelativeDynamicsFactor
         self._delta_clip = float(joint_delta_clip)
         self._gripper_force = float(gripper_force)
+        self._velocity_factor = float(velocity_factor)
 
         self.robot = Robot(robot_ip)
         self.gripper = Gripper(robot_ip)
         self.robot.set_collision_behavior(50, 50)
         self.robot.recover_from_errors()
+        # Per-call cap; we additionally use a much *softer* dynamics factor
+        # for the tiny streamed waypoints so consecutive sends don't generate
+        # velocity / acceleration discontinuities when overridden mid-motion.
         self.robot.relative_dynamics_factor = RelativeDynamicsFactor(
             velocity_factor, velocity_factor, velocity_factor,
         )
+        self._stream_dyn = RelativeDynamicsFactor(
+            min(velocity_factor, 0.05),
+            min(velocity_factor, 0.05),
+            min(velocity_factor, 0.05),
+        )
         self.gripper.open(0.1)
         self._gripper_is_open = True
+        self._homed_once = False
 
     @property
     def current_joint_state(self):
         return self.robot.current_joint_state
 
-    def move_to(self, target_q: np.ndarray):
+    def move_home(self, target_q: np.ndarray):
+        """Synchronous, full-speed move used at episode start. Comes to a stop."""
         target = np.asarray(target_q, dtype=np.float64).tolist()
         motion = self._JointWaypointMotion([
             self._JointWaypoint(target, reference_type=self._ReferenceType.Absolute)
         ])
-        self.robot.move(motion)
+        self.robot.move(motion, asynchronous=False)
+        self._homed_once = True
+
+    def move_to(self, target_q: np.ndarray):
+        """Streaming step. Asynchronous so the controller doesn't decelerate to
+        zero between waypoints; new sends override the prior target smoothly."""
+        target = np.asarray(target_q, dtype=np.float64).tolist()
+        wp = self._JointWaypoint(
+            target, reference_type=self._ReferenceType.Absolute
+        )
+        motion = self._JointWaypointMotion(
+            [wp], relative_dynamics_factor=self._stream_dyn,
+        )
+        try:
+            self.robot.move(motion, asynchronous=True)
+        except TypeError:
+            # Older franky versions don't accept asynchronous kwarg — fall back.
+            self.robot.move(motion)
 
     def set_gripper(self, open_: bool):
         if open_ == self._gripper_is_open:
@@ -328,9 +356,18 @@ def main():
         print(f"\n--- Episode {ep+1}/{args.num_episodes} ---")
         if not args.skip_home:
             print(f"  [home] moving to {np.array2string(np.asarray(home_q), precision=3)}")
-            robot.move_to(np.asarray(home_q, dtype=np.float32))
+            home_fn = getattr(robot, "move_home", robot.move_to)
+            home_fn(np.asarray(home_q, dtype=np.float32))
             robot.set_gripper(True)
-            time.sleep(0.5)
+            time.sleep(1.0)
+            # Make sure the controller is fully settled before we start
+            # streaming small waypoints — otherwise the first streamed
+            # send still sees nonzero velocity from the home motion and
+            # the reflex fires.
+            try:
+                robot.robot.recover_from_errors()  # type: ignore[attr-defined]
+            except AttributeError:
+                pass
 
         episode_step = 0
         success = False
