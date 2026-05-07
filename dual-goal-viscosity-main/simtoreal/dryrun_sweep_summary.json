@@ -1,0 +1,190 @@
+{
+  "summary": {
+    "shelf_4cam_fk": {
+      "25000": {
+        "ok": true,
+        "min_dist": 2.473834753036499,
+        "succ": false
+      },
+      "50000": {
+        "ok": true,
+        "min_dist": 2.473834753036499,
+        "succ": false
+      },
+      "75000": {
+        "ok": true,
+        "min_dist": 0.1620725691318512,
+        "succ": false
+      },
+      "100000": {
+        "ok": true,
+        "min_dist": 2.473834753036499,
+        "succ": false
+      },
+      "125000": {
+        "ok": true,
+        "min_dist": 2.473834753036499,
+        "succ": false
+      },
+      "150000": {
+        "ok": true,
+        "min_dist": 2.473834753036499,
+        "succ": false
+      },
+      "175000": {
+        "ok": true,
+        "min_dist": 2.473834753036499,
+        "succ": false
+      },
+      "200000": {
+        "ok": true,
+        "min_dist": 2.473834753036499,
+        "succ": false
+      }
+    },
+    "shelf_4cam_nofk": {
+      "25000": {
+        "ok": true,
+        "min_dist": 1.370161771774292,
+        "succ": false
+      },
+      "50000": {
+        "ok": true,
+        "min_dist": 0.8053315281867981,
+        "succ": false
+      },
+      "75000": {
+        "ok": true,
+        "min_dist": 0.6480165123939514,
+        "succ": false
+      },
+      "100000": {
+        "ok": true,
+        "min_dist": 0.4655872583389282,
+        "succ": false
+      },
+      "125000": {
+        "ok": true,
+        "min_dist": 0.43493056297302246,
+        "succ": false
+      },
+      "150000": {
+        "ok": true,
+        "min_dist": 0.4875059425830841,
+        "succ": false
+      },
+      "175000": {
+        "ok": true,
+        "min_dist": 2.473834753036499,
+        "succ": false
+      },
+      "200000": {
+        "ok": true,
+        "min_dist": 0.2648337483406067,
+        "succ": false
+      }
+    },
+    "pick_drop_fk": {
+      "25000": {
+        "ok": true,
+        "min_dist": 0.9403401017189026,
+        "succ": false
+      },
+      "50000": {
+        "ok": true,
+        "min_dist": 1.1841158866882324,
+        "succ": false
+      },
+      "75000": {
+        "ok": true,
+        "min_dist": 1.1213105916976929,
+        "succ": false
+      },
+      "100000": {
+        "ok": true,
+        "min_dist": 1.5704971551895142,
+        "succ": false
+      },
+      "125000": {
+        "ok": true,
+        "min_dist": 1.5642378330230713,
+        "succ": false
+      },
+      "150000": {
+        "ok": true,
+        "min_dist": 1.208278775215149,
+        "succ": false
+      },
+      "175000": {
+        "ok": true,
+        "min_dist": 1.5529582500457764,
+        "succ": false
+      },
+      "200000": {
+        "ok": true,
+        "min_dist": 0.9833943247795105,
+        "succ": false
+      }
+    },
+    "pick_drop_nofk": {
+      "25000": {
+        "ok": true,
+        "min_dist": 1.2563351392745972,
+        "succ": false
+      },
+      "50000": {
+        "ok": true,
+        "min_dist": 1.475575566291809,
+        "succ": false
+      },
+      "75000": {
+        "ok": true,
+        "min_dist": 1.5774943828582764,
+        "succ": false
+      },
+      "100000": {
+        "ok": true,
+        "min_dist": 1.5717623233795166,
+        "succ": false
+      },
+      "125000": {
+        "ok": true,
+        "min_dist": 0.15287703275680542,
+        "succ": false
+      },
+      "150000": {
+        "ok": true,
+        "min_dist": 1.574974775314331,
+        "succ": false
+      },
+      "175000": {
+        "ok": true,
+        "min_dist": 1.576283574104309,
+        "succ": false
+      },
+      "200000": {
+        "ok": true,
+        "min_dist": 0.1618017703294754,
+        "succ": false
+      }
+    }
+  },
+  "best": {
+    "shelf_4cam_fk": [
+      75000,
+      0.1620725691318512
+    ],
+    "shelf_4cam_nofk": [
+      200000,
+      0.2648337483406067
+    ],
+    "pick_drop_fk": [
+      25000,
+      0.9403401017189026
+    ],
+    "pick_drop_nofk": [
+      125000,
+      0.15287703275680542
+    ]
+  }
+}
