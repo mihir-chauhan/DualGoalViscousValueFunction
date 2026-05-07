@@ -124,10 +124,14 @@ def _load_goal(args) -> np.ndarray:
         return goal
     if args.goal_from_demo is None:
         raise ValueError("Pass either --goal-joints or --goal-from-demo.")
-    with np.load(args.goal_from_demo) as f:
+    return _demo_state(args.goal_from_demo, args.goal_demo_idx, "end")
+
+
+def _demo_state(npz_path: str, demo_idx: int, which: str) -> np.ndarray:
+    """Return the first ('start') or last ('end') state of trajectory `demo_idx`."""
+    with np.load(npz_path) as f:
         obs = np.asarray(f["observations"], dtype=np.float32)
         terms = np.asarray(f["terminals"], dtype=np.float32)
-    # Last index of the chosen trajectory: walk through terminal positions.
     term_locs = np.flatnonzero(terms > 0)
     # Compact OGBench datasets put terminal=1 on both the last *and* the
     # second-to-last step of every demo. Collapse adjacent runs to recover
@@ -138,13 +142,15 @@ def _load_goal(args) -> np.ndarray:
             traj_ends[-1] = t
         else:
             traj_ends.append(int(t))
-    if args.goal_demo_idx >= len(traj_ends):
+    if demo_idx >= len(traj_ends):
         raise IndexError(
-            f"--goal-demo-idx {args.goal_demo_idx} out of range "
-            f"(found {len(traj_ends)} trajectories)."
+            f"demo idx {demo_idx} out of range (found {len(traj_ends)} trajectories) in {npz_path}."
         )
-    end = traj_ends[args.goal_demo_idx]
-    return obs[end].astype(np.float32)
+    if which == "end":
+        return obs[traj_ends[demo_idx]].astype(np.float32)
+    # First step of trajectory `demo_idx`: 0 for the first traj, else one past the previous end.
+    start = 0 if demo_idx == 0 else traj_ends[demo_idx - 1] + 1
+    return obs[start].astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -183,12 +189,14 @@ class _RealRobot:
 
     def __init__(self, robot_ip: str, joint_delta_clip: float, velocity_factor: float,
                  gripper_force: float):
-        from franky import (Gripper, JointWaypoint, JointWaypointMotion,
-                            ReferenceType, RelativeDynamicsFactor, Robot)
+        from franky import (ControlException, Gripper, JointWaypoint,
+                JointWaypointMotion, ReferenceType,
+                RelativeDynamicsFactor, Robot)
         self._JointWaypoint = JointWaypoint
         self._JointWaypointMotion = JointWaypointMotion
         self._ReferenceType = ReferenceType
         self._RelDyn = RelativeDynamicsFactor
+        self._ControlException = ControlException
         self._delta_clip = float(joint_delta_clip)
         self._gripper_force = float(gripper_force)
         self._velocity_factor = float(velocity_factor)
@@ -212,6 +220,12 @@ class _RealRobot:
         self._gripper_is_open = True
         self._homed_once = False
 
+    def _recover_from_motion_error(self):
+        try:
+            self.robot.recover_from_errors()
+        except Exception:
+            pass
+
     @property
     def current_joint_state(self):
         return self.robot.current_joint_state
@@ -222,8 +236,14 @@ class _RealRobot:
         motion = self._JointWaypointMotion([
             self._JointWaypoint(target, reference_type=self._ReferenceType.Absolute)
         ])
-        self.robot.move(motion, asynchronous=False)
-        self._homed_once = True
+        try:
+            self.robot.move(motion, asynchronous=False)
+            self._homed_once = True
+            return True
+        except self._ControlException as exc:
+            print(f"[eval] warning: home motion failed, recovering and continuing: {exc}")
+            self._recover_from_motion_error()
+            return False
 
     def move_to(self, target_q: np.ndarray):
         """Streaming step. Asynchronous so the controller doesn't decelerate to
@@ -239,7 +259,17 @@ class _RealRobot:
             self.robot.move(motion, asynchronous=True)
         except TypeError:
             # Older franky versions don't accept asynchronous kwarg — fall back.
-            self.robot.move(motion)
+            try:
+                self.robot.move(motion)
+            except self._ControlException as exc:
+                print(f"[eval] warning: streaming motion failed, recovering and continuing: {exc}")
+                self._recover_from_motion_error()
+                return False
+        except self._ControlException as exc:
+            print(f"[eval] warning: streaming motion failed, recovering and continuing: {exc}")
+            self._recover_from_motion_error()
+            return False
+        return True
 
     def set_gripper(self, open_: bool):
         if open_ == self._gripper_is_open:
@@ -278,7 +308,7 @@ def parse_args():
 
     # Episode
     p.add_argument("--num-episodes", type=int, default=5)
-    p.add_argument("--episode-length", type=int, default=200)
+    p.add_argument("--episode-length", type=int, default=400)
     p.add_argument("--control-hz", type=float, default=10.0)
     p.add_argument("--success-joint-thresh", type=float, default=0.05,
                    help="Success when ||q - q_goal||_2 (radians) <= this value.")
@@ -290,6 +320,9 @@ def parse_args():
     # Home pose (.npy 7-dof) — same convention as the CQN-AS simtoreal scripts.
     p.add_argument("--home-q", type=str, default=None,
                    help="JSON list of 7 joint angles for home pose.")
+    p.add_argument("--home-npy", type=str, nargs="+", default=None,
+                   help="One or more .npy files (each 7 joint angles). If multiple, "
+                        "they are visited in order as a homing sequence.")
     p.add_argument("--skip-home", action="store_true")
 
     # Dry-run / safety
@@ -325,12 +358,24 @@ def main():
     goal = _load_goal(args)
     print(f"[eval] goal (8-dim): {np.array2string(goal, precision=3)}")
 
-    home_q = json.loads(args.home_q) if args.home_q else goal[:JOINT_DIM].tolist()
+    if args.home_npy:
+        home_qs = []
+        for path in args.home_npy:
+            wp = np.asarray(np.load(path), dtype=np.float32).reshape(-1)
+            if wp.shape != (JOINT_DIM,):
+                raise ValueError(
+                    f"{path}: expected shape ({JOINT_DIM},), got {wp.shape}"
+                )
+            home_qs.append(wp)
+    elif args.home_q is not None:
+        home_qs = [np.asarray(json.loads(args.home_q), dtype=np.float32)]
+    else:
+        home_qs = [np.asarray(goal[:JOINT_DIM], dtype=np.float32)]
 
     # Robot connection (lazy: dry-run avoids importing franky entirely).
     if args.dry_run:
         print("[eval] DRY RUN — using simulated robot")
-        robot = _DryRunRobot(np.asarray(home_q, dtype=np.float32))
+        robot = _DryRunRobot(home_qs[-1])
     else:
         print(f"[eval] connecting to robot at {args.robot_ip}")
         robot = _RealRobot(
@@ -355,9 +400,14 @@ def main():
     for ep in range(args.num_episodes):
         print(f"\n--- Episode {ep+1}/{args.num_episodes} ---")
         if not args.skip_home:
-            print(f"  [home] moving to {np.array2string(np.asarray(home_q), precision=3)}")
             home_fn = getattr(robot, "move_home", robot.move_to)
-            home_fn(np.asarray(home_q, dtype=np.float32))
+            home_ok = True
+            for i, wp in enumerate(home_qs):
+                tag = f" {i+1}/{len(home_qs)}" if len(home_qs) > 1 else ""
+                print(f"  [home{tag}] moving to {np.array2string(wp, precision=3)}")
+                ok = home_fn(wp)
+                if ok is False:
+                    home_ok = False
             robot.set_gripper(True)
             time.sleep(1.0)
             # Make sure the controller is fully settled before we start
@@ -368,6 +418,8 @@ def main():
                 robot.robot.recover_from_errors()  # type: ignore[attr-defined]
             except AttributeError:
                 pass
+            if not home_ok:
+                print("  [home] continuing after motion error")
 
         episode_step = 0
         success = False

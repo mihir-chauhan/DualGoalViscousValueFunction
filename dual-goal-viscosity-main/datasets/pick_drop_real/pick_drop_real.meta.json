@@ -1,0 +1,17 @@
+{
+  "name": "pick_drop_real",
+  "obs_dim": 8,
+  "action_dim": 8,
+  "num_train_demos": 3,
+  "num_val_demos": 1,
+  "train_steps_total": 480,
+  "val_steps_total": 179,
+  "train_traj_lengths": [
+    153,
+    162,
+    165
+  ],
+  "val_traj_lengths": [
+    179
+  ]
+}

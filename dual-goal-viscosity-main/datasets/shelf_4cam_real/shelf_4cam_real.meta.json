@@ -1,0 +1,23 @@
+{
+  "name": "shelf_4cam_real",
+  "obs_dim": 8,
+  "action_dim": 8,
+  "num_train_demos": 9,
+  "num_val_demos": 1,
+  "train_steps_total": 961,
+  "val_steps_total": 109,
+  "train_traj_lengths": [
+    202,
+    113,
+    77,
+    78,
+    104,
+    113,
+    99,
+    111,
+    64
+  ],
+  "val_traj_lengths": [
+    109
+  ]
+}
