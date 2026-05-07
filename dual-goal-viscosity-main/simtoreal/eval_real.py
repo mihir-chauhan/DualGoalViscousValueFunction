@@ -308,7 +308,7 @@ def parse_args():
 
     # Episode
     p.add_argument("--num-episodes", type=int, default=5)
-    p.add_argument("--episode-length", type=int, default=400)
+    p.add_argument("--episode-length", type=int, default=200)
     p.add_argument("--control-hz", type=float, default=10.0)
     p.add_argument("--success-joint-thresh", type=float, default=0.05,
                    help="Success when ||q - q_goal||_2 (radians) <= this value.")

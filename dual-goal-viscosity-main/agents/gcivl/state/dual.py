@@ -157,7 +157,7 @@ class GCIVLDualAgent(flax.struct.PyTreeNode):
         lambda_temp = 1.0
         sigma = jnp.sqrt(2.0 * nu)
         K = self.config.get('num_walks', 10)
-        kappa = 1.0
+        kappa = 0.1
         
         # 2. Setup Inputs
         obs = batch['observations']
@@ -225,7 +225,7 @@ class GCIVLDualAgent(flax.struct.PyTreeNode):
         
         delta_t = 1.0
 
-        metric_residual = jnp.maximum(0.0, cost_to_neighbor - 1.0 * delta_t)
+        metric_residual = jnp.maximum(0.0, cost_to_neighbor - q_s * delta_t)
         loss_metric = jnp.square(metric_residual).mean()
         use_metric = self.config.get('enable_viscous_metric', True)
         use_metric_only = self.config.get('use_metric_only', False)
@@ -486,7 +486,7 @@ def get_config():
             enable_viscous_metric = True,
             use_metric_only = False,
             num_walks = 10,  # Number of stochastic walks for viscous regularization.
-            viscous_scale = 0.01,  # Viscous scale (nu)
+            viscous_scale = 0.001,  # Viscous scale (nu)
             dataset_class='GCDataset',  # Dataset class name.
             speed_profile = 'constant', # the speed profile used in the Eikonal loss
             oraclerep=False,  # always False; dummy option for compatibility.
