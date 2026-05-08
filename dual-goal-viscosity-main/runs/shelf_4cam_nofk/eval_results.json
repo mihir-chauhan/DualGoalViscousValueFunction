@@ -1,6 +1,6 @@
 {
   "save_dir": "runs/shelf_4cam_nofk",
-  "restore_step": 25000,
+  "restore_step": 200000,
   "goal": [
     -0.8147367238998413,
     -0.9264296293258667,
@@ -18,7 +18,7 @@
       "episode": 1,
       "steps": 200,
       "success": false,
-      "min_joint_dist": 2.4691662788391113
+      "min_joint_dist": 2.288339853286743
     }
   ]
 }

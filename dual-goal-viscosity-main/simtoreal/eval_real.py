@@ -57,6 +57,11 @@ JOINT_DIM = 7
 OBS_DIM = JOINT_DIM + 1
 ACT_DIM = JOINT_DIM + 1
 
+# Franka Panda hardware joint limits (rad). Pulled in slightly from the
+# libfranka boundary so we never sit *exactly* on the wall.
+_FRANKA_Q_MIN = np.array([-2.8773, -1.7428, -2.8773, -3.0518, -2.8773,  0.0025, -2.8773], dtype=np.float32)
+_FRANKA_Q_MAX = np.array([ 2.8773,  1.7428,  2.8773, -0.0898,  2.8773,  3.7325,  2.8773], dtype=np.float32)
+
 
 # ---------------------------------------------------------------------------
 # Config / agent reconstruction
@@ -444,13 +449,22 @@ def main():
             delta_q = action[:JOINT_DIM]
             # Safety clip per-step delta — same convention as the CQN-AS env.
             delta_q = np.clip(delta_q, -args.joint_delta_clip, args.joint_delta_clip)
-            target_q = np.asarray(robot.current_joint_state.position, dtype=np.float32)[:JOINT_DIM] + delta_q
+            cur_q = np.asarray(robot.current_joint_state.position, dtype=np.float32)[:JOINT_DIM]
+            target_q = cur_q + delta_q
+            # Hard-clip to Franka joint limits so we never command into a wall.
+            target_q = np.clip(target_q, _FRANKA_Q_MIN, _FRANKA_Q_MAX).astype(np.float32)
+            effective_delta = target_q - cur_q
             grip_target = bool(action[JOINT_DIM] >= 0.5)
 
             if args.dry_run:
-                print(f"    step {step:3d}  d={dist:.3f}  Δq={np.array2string(delta_q, precision=3)}  "
+                clamped = "*" if not np.allclose(effective_delta, delta_q, atol=1e-6) else " "
+                print(f"    step {step:3d}{clamped} d={dist:.3f}  Δq={np.array2string(effective_delta, precision=3)}  "
                       f"grip={'O' if grip_target else 'C'}")
-            robot.move_to(target_q)
+            # If clamping removed all motion, the policy is pushing into a joint
+            # wall — skip the move (sending a zero-delta target can still trigger
+            # discontinuity reflexes mid-stream).
+            if np.max(np.abs(effective_delta)) > 1e-5:
+                robot.move_to(target_q)
             robot.set_gripper(grip_target)
 
             episode_step = step + 1

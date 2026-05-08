@@ -1,6 +1,6 @@
 {
   "save_dir": "runs/pick_drop_fk",
-  "restore_step": 200000,
+  "restore_step": 75000,
   "goal": [
     -0.6088171005249023,
     -0.5938776731491089,
@@ -18,7 +18,7 @@
       "episode": 1,
       "steps": 200,
       "success": false,
-      "min_joint_dist": 1.4902642965316772
+      "min_joint_dist": 1.5030760765075684
     }
   ]
 }
